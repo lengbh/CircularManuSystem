@@ -117,3 +117,56 @@ class NFCReader:
             time.sleep(0.1)
 
         return None
+
+
+class Part:
+    """
+    Represents a part being tracked through the system
+
+    Stores part ID and events in format:
+    {timestamp, part_id, station_id, activity}
+    """
+
+    def __init__(self, part_id):
+        """
+        Create a tracked part
+
+        part_id: Part ID (from NFC tag or generated)
+        """
+        self.part_id = part_id
+        self.entry_time = time.time()
+        self.events = []
+        self.current_location = "Entry"
+
+    def add_event(self, station_id, activity):
+        """
+        Record an event
+
+        station_id: Station ID (e.g., "S1" for Station 1, "S2" for Station 2, "C1" for Corner 1, etc.)
+
+        activity: Activity type (e.g., "ENTER", "EXIT", "PROCESS")
+        """
+        event = {
+            'timestamp': time.time(),
+            'part_id': self.part_id,
+            'station_id': station_id,
+            'activity': activity
+        }
+        self.events.append(event)
+        self.current_location = station_id
+    # Some helping functions for tracking and displaying part information
+    def time_in_system(self):
+        """Get time part has been in system (seconds)"""
+        return time.time() - self.entry_time
+
+    def get_short_id(self):
+        """Get shortened part ID for display"""
+        if len(self.part_id) > 8:
+            return self.part_id[:8] + "..."
+        return self.part_id
+
+    def __str__(self):
+        return f"Part({self.get_short_id()} at {self.current_location})"
+
+    def __repr__(self):
+        return self.__str__()
