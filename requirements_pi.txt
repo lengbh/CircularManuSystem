@@ -1,0 +1,13 @@
+# requirements_pi.txt - Raspberry Pi dependencies
+pyyaml>=6.0
+paho-mqtt>=1.6.1
+colorlog>=6.7.0
+numpy>=1.24.0
+pandas>=2.0.0
+influxdb-client>=1.36.0
+RPi.GPIO>=0.7.1
+adafruit-circuitpython-motorkit>=1.6.11
+adafruit-circuitpython-pca9685>=3.4.6
+adafruit-circuitpython-pn532>=2.3.10
+spidev>=3.6
+adafruit-circuitpython-mcp230xx

@@ -1,0 +1,12 @@
+# For simulation and development on Mac
+pyyaml>=6.0
+paho-mqtt>=1.6.1
+colorlog>=6.7.0
+numpy>=1.24.0
+pandas>=2.0.0
+influxdb-client>=1.36.0
+adafruit-circuitpython-mcp230xx
+
+
+# Note: Raspberry Pi-specific packages will be installed on Pi
+# These are: RPi.GPIO, adafruit-circuitpython-motorkit, etc.
