@@ -11,6 +11,7 @@ from threading import Lock # For preventing function calls at the same time
 try:
     import board
     import busio
+    from digitalio import DigitalInOut
     from adafruit_pn532.spi import PN532_SPI
     HARDWARE_AVAILABLE = True
 except (ImportError, NotImplementedError):
@@ -48,9 +49,9 @@ class NFCReader:
 
                 # Select chip enable based on reader number
                 if reader_num == 1:
-                    cs_pin = board.CE0
+                    cs_pin = DigitalInOut(board.D8)
                 elif reader_num == 2:
-                    cs_pin = board.CE1
+                    cs_pin = DigitalInOut(board.D7)
                 else:
                     raise ValueError("reader_num must be 1 or 2")
 
