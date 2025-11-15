@@ -1,13 +1,13 @@
 """
 NFC Reader
-Reads NFC tags for part identification
+Each reader runs in its own thread, continuously polling for tags
 """
 
 import logging
 import time
-from threading import Lock # For preventing function calls at the same time
+from threading import Thread, Lock, Event
 
-# Try to import NFC libraries, simulation/hardware mode
+# Try to import NFC libraries
 try:
     import board
     import busio
@@ -15,83 +15,132 @@ try:
     HARDWARE_AVAILABLE = True
 except (ImportError, NotImplementedError):
     HARDWARE_AVAILABLE = False
-    logging.warning("NFC libraries not available or not supported - using simulation mode")
+    logging.warning("NFC libraries not available - using simulation mode")
 
 
-class NFCReader:
+class NFCReaderThread(Thread):
     """
-    Reads NFC tags via PN532 SPI reader
+    NFC Reader Producer Thread
 
-    Two readers:
-    Reader 1 (Station 1): CE0
-    Reader 2 (Station 2): CE1
+    Continuously polls for NFC tags and puts results in queue
     """
 
-    def __init__(self, reader_num, simulation=False):
+    def __init__(self, reader_num, station_id, nfc_queue, simulation=False):
         """
-        Initialize NFC reader
+        Initialize NFC reader thread
 
-        reader_num: Reader number (1 for Station 1 or 2 for Station 2)
-
+        reader_num: Reader number (1 or 2)
+        station_id: Station ID (1 or 2)
+        nfc_queue: Queue to put NFC events into
         simulation: Run without hardware
         """
+        # Thread setup
+        super().__init__(daemon=True, name=f"NFC{reader_num}")
+
         self.logger = logging.getLogger(f"NFC{reader_num}")
         self.reader_num = reader_num
+        self.station_id = station_id
+        self.nfc_queue = nfc_queue
         self.simulation = simulation or not HARDWARE_AVAILABLE
+
+        # Thread control
+        self.running = False
+        self.stop_event = Event()
+
+        # Hardware control
         self.lock = Lock()
         self.pn532 = None
 
+        # Initialize hardware
         if not self.simulation:
-            try:
-                # Initialize SPI
-                spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
-
-                # Select chip enable based on reader number
-                if reader_num == 1:
-                    cs_pin = board.CE0
-                elif reader_num == 2:
-                    cs_pin = board.CE1
-                else:
-                    raise ValueError("reader_num must be 1 or 2")
-
-                # Initialize PN532 NFC reader object
-                self.pn532 = PN532_SPI(spi, cs_pin, debug=False)
-
-                # Configure PN532
-                self.pn532.SAM_configuration()
-
-                self.logger.info(f"NFC Reader {reader_num} initialized")
-            # Error handling for hardware failures so the program can fallback to simulation mode
-            except Exception as e:
-                self.logger.error(f"Failed to initialize: {e}")
-                self.logger.error("Falling back to simulation mode")
-                self.simulation = True
+            self._init_hardware()
         else:
-            self.logger.info("Running in SIMULATION mode")
+            self.logger.info(f"NFC Reader {reader_num} running in SIMULATION mode")
 
-    def read_tag(self, timeout=1.0):
+    def _init_hardware(self):
+        """Initialize PN532 NFC reader hardware"""
+        try:
+            # Initialize SPI
+            spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
+
+            # Select chip enable based on reader number
+            if self.reader_num == 1:
+                cs_pin = board.CE0 # Chip Enable 0
+            elif self.reader_num == 2:
+                cs_pin = board.CE1 # Chip Enable 1
+            else:
+                raise ValueError("reader_num must be 1 or 2")
+
+            # Initialize PN532
+            self.pn532 = PN532_SPI(spi, cs_pin, debug=False)
+            self.pn532.SAM_configuration()
+
+            self.logger.info(f"NFC Reader {self.reader_num} initialized on CE{self.reader_num-1}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize: {e}")
+            self.logger.error("Falling back to simulation mode")
+            self.simulation = True
+
+    def run(self):
+        """Main thread loop - continuously scans for NFC tags"""
+        self.running = True
+        self.logger.info(f"NFC Reader {self.reader_num} thread started")
+
+        while self.running and not self.stop_event.is_set():
+            try:
+                # Blocking NFC read to detect tag and not holding up the other threads
+                part_id = self._blocking_read_tag()
+
+                if part_id:
+                    # Capture timestamp after successful read
+                    t_nfc = time.time()
+
+                    # Create NFC event
+                    event = {
+                        'timestamp': t_nfc,
+                        'station_id': self.station_id,
+                        'part_id': part_id,
+                        'reader_num': self.reader_num
+                    }
+
+                    # Put in queue
+                    try:
+                        self.nfc_queue.put_nowait(event) # Non-blocking put to avoid blocking producer thread
+                        self.logger.info(f"NFC read: Station {self.station_id}, Part {part_id[:8]}...")
+                    except:
+                        self.logger.warning(f"NFC queue full, dropping read: {part_id[:8]}")
+
+                # Small delay between reads
+                time.sleep(0.1)
+
+            except Exception as e:
+                self.logger.error(f"Error in NFC scan loop: {e}")
+                time.sleep(1)
+
+        self.logger.info(f"NFC Reader {self.reader_num} thread stopped")
+
+    def _blocking_read_tag(self, timeout=1.0):
         """
-        Read NFC tag
+        Blocking NFC tag read
 
         timeout: Read timeout in seconds
-        Returns:
-            str: Tag UID as hex string (e.g., "04a1b2c3d4e5f6"),
-        or None if no tag
 
+        Returns: Tag UID as hex string, or None if no tag
         """
         if self.simulation:
             # In simulation, return None (no tag)
+            time.sleep(0.5)  # Simulate blocking read
             return None
 
         with self.lock:
             try:
-                # Read tag with 1 second timeout
+                # Read passive target (NFC tag)
                 uid = self.pn532.read_passive_target(timeout=timeout)
 
                 if uid:
-                    # Convert UID bytes to hex string for formatting
+                    # Convert UID bytes to hex string
                     uid_hex = ''.join([f'{b:02x}' for b in uid])
-                    self.logger.debug(f"Tag read: {uid_hex}")
                     return uid_hex
 
                 return None
@@ -100,31 +149,18 @@ class NFCReader:
                 self.logger.error(f"Read error: {e}")
                 return None
 
-    def wait_for_tag(self, timeout=10):
-        """
-        Wait for tag to be present
-
-        timeout: Maximum wait time in seconds
-        Returns:
-            str: Tag UID, or None on timeout
-        """
-        start = time.time()
-
-        while time.time() - start < timeout:
-            uid = self.read_tag(timeout=0.5)
-            if uid:
-                return uid
-            time.sleep(0.1)
-
-        return None
+    def stop(self):
+        """Stop the NFC reader thread"""
+        self.logger.info(f"Stopping NFC Reader {self.reader_num}...")
+        self.running = False
+        self.stop_event.set()
 
 
 class Part:
     """
     Represents a part being tracked through the system
 
-    Stores part ID and events in format:
-    {timestamp, part_id, station_id, activity}
+    Stores part ID and events
     """
 
     def __init__(self, part_id):
@@ -138,23 +174,23 @@ class Part:
         self.events = []
         self.current_location = "Entry"
 
-    def add_event(self, station_id, activity):
+    def add_event(self, station_id, activity, timestamp):
         """
         Record an event
 
-        station_id: Station ID (e.g., "S1" for Station 1, "S2" for Station 2, "C1" for Corner 1, etc.)
-
-        activity: Activity type (e.g., "ENTER", "EXIT", "PROCESS")
+        station_id: Station ID (e.g., "S1", "S2")
+        activity: Activity type (e.g., "ENTER", "EXIT")
+        timestamp: Event timestamp
         """
         event = {
-            'timestamp': time.time(),
+            'timestamp': timestamp,
             'part_id': self.part_id,
             'station_id': station_id,
             'activity': activity
         }
         self.events.append(event)
         self.current_location = station_id
-    # Some helping functions for tracking and displaying part information
+
     def time_in_system(self):
         """Get time part has been in system (seconds)"""
         return time.time() - self.entry_time
