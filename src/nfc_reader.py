@@ -11,6 +11,7 @@ from threading import Thread, Lock, Event
 try:
     import board
     import busio
+    from digitalio import DigitalInOut
     from adafruit_pn532.spi import PN532_SPI
     HARDWARE_AVAILABLE = True
 except (ImportError, NotImplementedError):
@@ -114,6 +115,22 @@ class NFCReaderThread(Thread):
                 # Small delay between reads
                 time.sleep(0.1)
 
+                # Select chip enable based on reader number
+                if reader_num == 1:
+                    cs_pin = DigitalInOut(board.D8)
+                elif reader_num == 2:
+                    cs_pin = DigitalInOut(board.D7)
+                else:
+                    raise ValueError("reader_num must be 1 or 2")
+
+                # Initialize PN532 NFC reader object
+                self.pn532 = PN532_SPI(spi, cs_pin, debug=False)
+
+                # Configure PN532
+                self.pn532.SAM_configuration()
+
+                self.logger.info(f"NFC Reader {reader_num} initialized")
+            # Error handling for hardware failures so the program can fallback to simulation mode
             except Exception as e:
                 self.logger.error(f"Error in NFC scan loop: {e}")
                 time.sleep(1)
