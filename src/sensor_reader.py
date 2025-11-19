@@ -1,26 +1,19 @@
 """
 Sensor Reader
-Reads all 18 sensors:
-- 8 sensors on Pi's native GPIO (6 station + 2 main conveyor exit)
-- 10 sensors on a GPIO Expander (8 limit switches + 2 main conveyor start)
+Uses GPIO interrupts for Pi sensors and polling thread for MCP23017
 """
 
 import logging
 import time
-from threading import Lock # For data corruption prevention
+from threading import Thread, Lock, Event
 
 # Try to import hardware libraries
 try:
-    # Pi native GPIO
     import RPi.GPIO as GPIO
-
-    # I2C and MCP23017 (GPIO Expander used in the project) libraries
     import board
     import busio
     import digitalio
     from adafruit_mcp230xx.mcp23017 import MCP23017
-
-    # Library detection to ba able run with or without hardware as "Simulation mode"
     HARDWARE_AVAILABLE = True
 except (ImportError, NotImplementedError, RuntimeError) as e:
     HARDWARE_AVAILABLE = False
@@ -29,188 +22,287 @@ except (ImportError, NotImplementedError, RuntimeError) as e:
 
 class SensorReader:
     """
-    Manages all sensors in the system
+    Hardware producer for sensor events
+    Pi GPIO sensors use interrupts for microsecond precision
+    MCP23017 sensors use polling thread
     """
-    # At this point of the project the PinNumbers are randomly assigned for testing purposes
 
-    # Pi-connected native GPIO Pins
-    # Station 1
+    # Pi-connected GPIO pins
     STATION1_ENTRY = 17
     STATION1_PROCESS = 27
-    STATION1_EXIT = 22 # This is also Corner 4's arrival sensor
-
-    # Station 2
+    STATION1_EXIT = 22
     STATION2_ENTRY = 5
     STATION2_PROCESS = 6
-    STATION2_EXIT = 13 # This is also Corner 2's arrival sensor
+    STATION2_EXIT = 13
+    CORNER1_POS = 21
+    CORNER3_POS = 1  # BCM GPIO 1 = Physical Pin 28
 
-    # Corner Position Sensors (Arrival sensors)
-    CORNER1_POS = 21 # End of Top Conveyor
-    CORNER2_POS = STATION2_EXIT # End of Station 2
-    CORNER3_POS = 1 # End of Bottom Conveyor
-    CORNER4_POS = STATION1_EXIT # End of Station 1
-
-    # List of all Pi-connected pins
-    PI_PINS = [
-        STATION1_ENTRY, STATION1_PROCESS, STATION1_EXIT,
-        STATION2_ENTRY, STATION2_PROCESS, STATION2_EXIT,
-        CORNER1_POS, CORNER3_POS
-    ]
-
-    # GPIO Expander Pins "lookup table"
-    MCP_PIN_MAP = {
-        'CORNER1_RET': 0,  # GPA0
-        'CORNER2_RET': 1,  # GPA1
-        'CORNER3_RET': 2,  # GPA2
-        'CORNER4_RET': 3,  # GPA3
-
-        'M1_START': 4,     # GPA4 (Start of Top Conveyor)
-        'M2_START': 5,     # GPA5 (Start of Bottom Conveyor)
-
-        'CORNER1_EXT': 8,  # GPB0
-        'CORNER2_EXT': 9,  # GPB1
-        'CORNER3_EXT': 10, # GPB2
-        'CORNER4_EXT': 11, # GPB3
+    # Sensor name mapping (GPIO pin to a light barrier name)
+    GPIO_TO_BARRIER = {
+        17: 'S1_ENTRY',
+        27: 'S1_PROCESS',
+        22: 'S1_EXIT',
+        5: 'S2_ENTRY',
+        6: 'S2_PROCESS',
+        13: 'S2_EXIT',
+        21: 'C1_POS',
+        1: 'C3_POS'
     }
 
-    def __init__(self, simulation=False):
+    # Barrier to station/corner mapping
+    BARRIER_TO_LOCATION = {
+        'S1_ENTRY': ('station', 1),
+        'S1_PROCESS': ('station', 1),
+        'S1_EXIT': ('station', 1),
+        'S2_ENTRY': ('station', 2),
+        'S2_PROCESS': ('station', 2),
+        'S2_EXIT': ('station', 2),
+        'C1_POS': ('corner', 1),
+        'C2_POS': ('corner', 2),
+        'C3_POS': ('corner', 3),
+        'C4_POS': ('corner', 4),
+    }
+
+    # MCP23017 pin mapping
+    MCP_PIN_MAP = {
+        'CORNER1_RET': 0,
+        'CORNER2_RET': 1,
+        'CORNER3_RET': 2,
+        'CORNER4_RET': 3,
+        'M1_START': 4,
+        'M2_START': 5,
+        'CORNER1_EXT': 8,
+        'CORNER2_EXT': 9,
+        'CORNER3_EXT': 10,
+        'CORNER4_EXT': 11,
+    }
+
+    # MCP light barrier to location mapping
+    MCP_BARRIER_TO_LOCATION = {
+        'CORNER1_RET': ('corner', 1),
+        'CORNER2_RET': ('corner', 2),
+        'CORNER3_RET': ('corner', 3),
+        'CORNER4_RET': ('corner', 4),
+        'CORNER1_EXT': ('corner', 1),
+        'CORNER2_EXT': ('corner', 2),
+        'CORNER3_EXT': ('corner', 3),
+        'CORNER4_EXT': ('corner', 4),
+        'M1_START': ('conveyor', 1),
+        'M2_START': ('conveyor', 2),
+    }
+
+    def __init__(self, gpio_queue, mcp_queue, simulation=False):
         """
-        Initialize sensor reader
+        Initialize sensor reader as producer
+
+        gpio_queue: Queue for Pi GPIO events
+        mcp_queue: Queue for MCP23017 events
+        simulation: Run without hardware
         """
         self.logger = logging.getLogger("SensorReader")
         self.simulation = simulation or not HARDWARE_AVAILABLE
+
+        # Event queues
+        self.gpio_queue = gpio_queue
+        self.mcp_queue = mcp_queue
+
+        # Debounce tracking
+        self.last_trigger_time = {}
+        self.debounce_time = 0.05  # 50ms debounce
         self.lock = Lock()
+
+        # MCP polling thread
+        self.mcp_thread = None
+        self.mcp_running = False
+        self.mcp_stop_event = Event()
         self.mcp_pins = {}
         self.mcp = None
 
+        # Previous MCP states for edge detection
+        self.mcp_prev_state = {}
+
         if not self.simulation:
-            try:
-                # Setup Pi Native GPIO
-                GPIO.setmode(GPIO.BCM)
-                GPIO.setwarnings(False)
-                # Use set() to avoid duplicates
-                for pin in set(self.PI_PINS):
-                    # Sets the pin to be an input with a pull-up resistor
-                    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-                self.logger.info(f"Initialized {len(set(self.PI_PINS))} native GPIO sensors")
-
-                # Setup MCP23017 Expander
-                self.logger.info("Initializing MCP23017 GPIO expander...")
-                i2c = busio.I2C(board.SCL, board.SDA)
-                self.mcp = MCP23017(i2c) # Default address 0x20
-
-                # Configure all 10 expander pins as inputs with pull-ups
-                for name, pin_num in self.MCP_PIN_MAP.items():
-                    pin = self.mcp.get_pin(pin_num)
-                    pin.direction = digitalio.Direction.INPUT
-                    pin.pull = digitalio.Pull.UP
-                    self.mcp_pins[name] = pin # Save pin object into pins dictionary using its name as key for easy access
-
-                self.logger.info(f"Initialized {len(self.mcp_pins)} expander sensors")
-
-            except Exception as e:
-                self.logger.error(f"Failed to initialize hardware: {e}", exc_info=True)
-                self.logger.error("Falling back to simulation mode")
-                self.simulation = True
+            self._setup_gpio_interrupts()
+            self._setup_mcp_polling()
         else:
             self.logger.info("Running in SIMULATION mode")
 
-    def read_pi(self, pin):
-        """Read a sensor from the Pi's native GPIO"""
-        if self.simulation:
-            return False
+    def _setup_gpio_interrupts(self):
+        """Setup GPIO pins with interrupt based event detection"""
+        try:
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
 
+            # Setup all Pi GPIO pins
+            for pin in set([self.STATION1_ENTRY, self.STATION1_PROCESS, self.STATION1_EXIT,
+                           self.STATION2_ENTRY, self.STATION2_PROCESS, self.STATION2_EXIT,
+                           self.CORNER1_POS, self.CORNER3_POS]):
+                # Configure as input with pull-up resistor
+                GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+                # Add interrupt detection on rising edge (sensor triggers LOW to HIGH)
+                GPIO.add_event_detect(
+                    pin,
+                    GPIO.RISING,
+                    callback=self._gpio_callback,
+                    bouncetime=int(self.debounce_time * 1000)  # Hardware debounce in ms
+                )
+
+                # Initialize debounce tracking
+                self.last_trigger_time[pin] = 0
+
+            self.logger.info(f"Initialized {len(set([self.STATION1_ENTRY, self.STATION1_PROCESS, self.STATION1_EXIT, self.STATION2_ENTRY, self.STATION2_PROCESS, self.STATION2_EXIT, self.CORNER1_POS, self.CORNER3_POS]))} GPIO interrupts")
+
+        except Exception as e:
+            self.logger.error(f"Failed to setup GPIO interrupts: {e}", exc_info=True)
+            self.simulation = True
+
+    def _gpio_callback(self, channel):
+        """
+        GPIO interrupt callback
+
+        channel: GPIO pin number that triggered
+        """
+        # Get precise timestamp
+        t_gpio = time.time()
+
+        # Software debounce check
         with self.lock:
-            # With our sensor, HIGH (True) means a part is present
-            return GPIO.input(pin)
+            if (t_gpio - self.last_trigger_time.get(channel, 0)) < self.debounce_time:
+                return  # Ignore bounce
+            self.last_trigger_time[channel] = t_gpio
 
-    def read_mcp(self, name):
-        """Read a sensor from the MCP23017 expander"""
-        if self.simulation:
-            return False
+        # Handle dual-purpose sensors (one physical sensor, multiple logical barriers)
+        barriers = self._get_barriers_for_pin(channel)
 
-        with self.lock:
-            if name not in self.mcp_pins:
-                self.logger.error(f"Unknown MCP pin name: {name}")
-                return False
-            # Active LOW (pull-up) means value is False when triggered
-            return not self.mcp_pins[name].value
+        for barrier_id, location_type, location_id in barriers:
+            # Create event dictionary
+            event = {
+                'timestamp': t_gpio,
+                'barrier_id': barrier_id,
+                'location_type': location_type,
+                'location_id': location_id,
+                'source': 'gpio'
+            }
 
-    # Station 1 (Pi)
-    def station1_entry(self):
-        return self.read_pi(self.STATION1_ENTRY)
+            # Put in queue (non-blocking)
+            try:
+                self.gpio_queue.put_nowait(event)
+                self.logger.debug(f"GPIO event: {barrier_id} at {t_gpio:.6f}")
+            except:
+                self.logger.warning(f"GPIO queue full, dropping event: {barrier_id}")
 
-    def station1_process(self):
-        return self.read_pi(self.STATION1_PROCESS)
+    def _get_barriers_for_pin(self, channel):
+        """
+        Get all barrier IDs for a given GPIO pin
+        Handles dual-purpose sensors
 
-    def station1_exit(self):
-        return self.read_pi(self.STATION1_EXIT)
+        Returns: List of (barrier_id, location_type, location_id) tuples
+        """
+        barriers = []
 
-    # Station 2 (Pi)
-    def station2_entry(self):
-        return self.read_pi(self.STATION2_ENTRY)
+        # Primary barrier mapping
+        if channel in self.GPIO_TO_BARRIER:
+            barrier_id = self.GPIO_TO_BARRIER[channel]
+            location = self.BARRIER_TO_LOCATION.get(barrier_id, ('unknown', 0))
+            barriers.append((barrier_id, location[0], location[1]))
 
-    def station2_process(self):
-        return self.read_pi(self.STATION2_PROCESS)
+        # Dual purpose sensors (in the system station exits are also corner arrivals)
+        if channel == 22:  # S1_EXIT is also C4_POS
+            barriers.append(('C4_POS', 'corner', 4))
+        elif channel == 13:  # S2_EXIT is also C2_POS
+            barriers.append(('C2_POS', 'corner', 2))
 
-    def station2_exit(self):
-        return self.read_pi(self.STATION2_EXIT)
+        return barriers
 
-    # Corner Position Sensors (Pi)
-    def corner_pos(self, corner_num):
-        pins = [self.CORNER1_POS, self.CORNER2_POS, self.CORNER3_POS, self.CORNER4_POS]
-        return self.read_pi(pins[corner_num - 1])
+    def _setup_mcp_polling(self):
+        """Setup MCP23017 expander with polling thread"""
+        try:
+            self.logger.info("Initializing MCP23017 GPIO expander...")
+            i2c = busio.I2C(board.SCL, board.SDA)
+            self.mcp = MCP23017(i2c)
 
-    # Corner Extended Switches
-    def corner_extended(self, corner_num):
-        names = ['CORNER1_EXT', 'CORNER2_EXT', 'CORNER3_EXT', 'CORNER4_EXT']
-        return self.read_mcp(names[corner_num - 1])
+            # Configure all expander pins as inputs with pull ups
+            for name, pin_num in self.MCP_PIN_MAP.items():
+                pin = self.mcp.get_pin(pin_num)
+                pin.direction = digitalio.Direction.INPUT
+                pin.pull = digitalio.Pull.UP
+                self.mcp_pins[name] = pin
+                self.mcp_prev_state[name] = None  # Initialize previous state
 
-    # Corner Retracted Switches
-    def corner_retracted(self, corner_num):
-        names = ['CORNER1_RET', 'CORNER2_RET', 'CORNER3_RET', 'CORNER4_RET']
-        return self.read_mcp(names[corner_num - 1])
+            self.logger.info(f"Initialized {len(self.mcp_pins)} MCP23017 sensors")
 
-    def wait_for_pi(self, pin, timeout=10, debounce=0.05):
-        """Wait for a Pi-connected sensor to trigger"""
-        start = time.time()
-        while time.time() - start < timeout:
-            if self.read_pi(pin): # Check if the sensor is triggered
-                time.sleep(debounce) # Wait for debouncing in case of flickering
-                if self.read_pi(pin): # Check if the sensor is still triggered
-                    return True # Count it as a real trigger
-            time.sleep(0.01) # Small delay for better performance
-        return False
+            # Start polling thread
+            self.mcp_running = True
+            self.mcp_stop_event.clear()
+            self.mcp_thread = Thread(target=self._mcp_poll_loop, daemon=True)
+            self.mcp_thread.start()
+            self.logger.info("MCP23017 polling thread started")
 
-    def wait_for_mcp(self, name, timeout=10, debounce=0.05):
-        """Wait for an expander-connected sensor to trigger"""
-        start = time.time()
-        while time.time() - start < timeout:
-            if self.read_mcp(name):
-                time.sleep(debounce)
-                if self.read_mcp(name):
-                    return True
-            time.sleep(0.01)
-        return False
+        except Exception as e:
+            self.logger.error(f"Failed to setup MCP23017: {e}", exc_info=True)
+            self.simulation = True
 
-    def cleanup(self):
-        """Cleanup GPIO -> Reset all the used pins"""
+    def _mcp_poll_loop(self):
+        """MCP23017 polling thread , checks for state changes"""
+        self.logger.info("MCP polling loop started")
+
+        while self.mcp_running and not self.mcp_stop_event.is_set():
+            try:
+                for name, pin in self.mcp_pins.items():
+                    # Read current state (active low with pull-up)
+                    current_state = not pin.value
+                    prev_state = self.mcp_prev_state[name]
+
+                    # Detect rising edge (False to True)
+                    if prev_state is not None and not prev_state and current_state:
+                        # Get precise timestamp
+                        t_mcp = time.time()
+
+                        # Get location info
+                        location_type, location_id = self.MCP_BARRIER_TO_LOCATION.get(
+                            name, ('unknown', 0)
+                        )
+
+                        # Create event
+                        event = {
+                            'timestamp': t_mcp,
+                            'barrier_id': name,
+                            'location_type': location_type,
+                            'location_id': location_id,
+                            'source': 'mcp'
+                        }
+
+                        # Put in queue
+                        try:
+                            self.mcp_queue.put_nowait(event)
+                            self.logger.debug(f"MCP event: {name} at {t_mcp:.6f}")
+                        except:
+                            self.logger.warning(f"MCP queue full, dropping event: {name}")
+
+                    # Update previous state
+                    self.mcp_prev_state[name] = current_state
+
+                # Poll interval
+                time.sleep(0.01)  # 10ms polling rate
+
+            except Exception as e:
+                self.logger.error(f"Error in MCP poll loop: {e}")
+                time.sleep(0.1)
+
+    def stop(self):
+        """Stop the sensor reader"""
+        if self.mcp_running:
+            self.logger.info("Stopping MCP polling thread...")
+            self.mcp_running = False
+            self.mcp_stop_event.set()
+            if self.mcp_thread:
+                self.mcp_thread.join(timeout=2)
+
         if not self.simulation:
             GPIO.cleanup()
             self.logger.info("GPIO cleaned up")
 
-    def wait_for_main_conveyor_start(self, conveyor_num, timeout=10):
-        """Wait for the start sensor on M1 or M2 to trigger"""
-        if conveyor_num == 1:
-            return self.wait_for_mcp('M1_START', timeout=timeout)
-        elif conveyor_num == 2:
-            return self.wait_for_mcp('M2_START', timeout=timeout)
-        return False
-
-    def wait_for_station_entry(self, station_num, timeout=10):
-        """Wait for the entry sensor on S1 or S2 to trigger"""
-        if station_num == 1:
-            return self.wait_for_pi(self.STATION1_ENTRY, timeout=timeout)
-        elif station_num == 2:
-            return self.wait_for_pi(self.STATION2_ENTRY, timeout=timeout)
-        return False
+    def cleanup(self):
+        """Cleanup on exit"""
+        self.stop()

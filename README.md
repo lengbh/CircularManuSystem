@@ -16,105 +16,109 @@ This project implements a lab-scale manufacturing system with two processing sta
 ## System Architecture
 
 ```mermaid
-
+---
+config:
+  layout: elk
+---
 classDiagram
     direction TB
     class SystemManager {
         +config
-        +motors
-        +sensors
-        +nfc1, nfc2
-        +data_logger
-        +mqtt
-        +collision_mgr
-        +station1, station2
-        +corners[]
+        +gpio_queue
+        +mcp_queue
+        +nfc_queue
+        +fsm_map
         +start()
         +stop()
-        -load_config()
+        +monitor_health()
+        +log_alerts()
+    }
+    class CEPConsumer {
+        -pending_gpio_events
+        -pending_nfc_events
+        +run()
+        -_consume_events()
+        -_fuse_events()
+        -_expire_events()
+        -_deliver_event()
+    }
+    class SensorReader {
+        <<Producer>>
+        -gpio_queue
+        -mcp_queue
+        -_setup_gpio_interrupts()
+        -_gpio_callback()
+        -_setup_mcp_polling()
+        -_mcp_poll_loop()
+    }
+    class NFCReaderThread {
+        <<Producer>>
+        -nfc_queue
+        +run()
+        -_blocking_read_tag()
+    }
+    class StationController {
+        <<PassiveFSM>>
+        -state
+        -current_part
+        +process_event(event)
+        -_handle_idle()
+        -_handle_entering()
+        -_handle_processing()
+        -_handle_exiting()
+    }
+    class CornerController {
+        <<PassiveFSM>>
+        -state
+        -handshake_timeout
+        +process_event(event)
+        -_handle_idle()
+        -_handle_extending()
+        -_handle_waiting_for_confirmation()
+        -_handle_retracting()
     }
     class MotorController {
         -hat1, hat2
-        -simulation
         +set_speed(motor_num, speed)
         +stop(motor_num)
         +stop_all()
-        +start_conveyors()
-    }
-    class SensorReader {
-        -simulation
-        -lock
-        +read(pin)
-        +station1_entry()
-        +corner_pre(corner_num)
-        +wait_for(pin)
-    }
-    class NFCReader {
-        -pn532
-        -simulation
-        +read_tag(timeout)
-        +wait_for_tag(timeout)
-    }
-    class StationController {
-        -state
-        -current_part
-        +start()
-        +stop()
-        -run()
-        -state_idle()
-        -state_processing()
-    }
-    class CornerController {
-        -state
-        +start()
-        +stop()
-        -run()
-        -state_idle()
-        -state_extending()
-        -state_retracting()
     }
     class CollisionManager {
         -corners_occupied
-        -lock
-        +is_corner_safe(corner_num)
-        +reserve_corner(corner_num)
+        -corners_waiting_handshake
+        +request_corner(corner_num)
         +release_corner(corner_num)
+        +is_conveyor_safe_to_stop(motor_num)
     }
     class DataLogger {
         -log_file
-        -lock
         +log_event(part_id, station_id, activity)
         +get_kpis()
     }
     class MQTTHandler {
-        -client
-        -connected
         +publish_event(part_id, station_id, activity)
         +publish_kpi(kpi_name, value)
     }
-    class Part {
-        +part_id
-        +events
-        +current_location
-        +add_event()
-    }
-    SystemManager "1" *-- "1" MotorController : manages
+    SystemManager "1" *-- "1" CEPConsumer : manages
     SystemManager "1" *-- "1" SensorReader : manages
-    SystemManager "1" *-- "2" NFCReader : manages
-    SystemManager "1" *-- "1" DataLogger : manages
-    SystemManager "1" *-- "1" MQTTHandler : manages
-    SystemManager "1" *-- "1" CollisionManager : manages
+    SystemManager "1" *-- "2" NFCReaderThread : manages
     SystemManager "1" *-- "2" StationController : manages
     SystemManager "1" *-- "4" CornerController : manages
+    SystemManager "1" *-- "1" MotorController : manages
+    SystemManager "1" *-- "1" CollisionManager : manages
+    SystemManager "1" *-- "1" DataLogger : manages
+    SystemManager "1" *-- "1" MQTTHandler : manages
+    SensorReader ..> CEPConsumer : feeds via queues
+    NFCReaderThread ..> CEPConsumer : feeds via queues
+    CEPConsumer --> StationController : calls process_event()
+    CEPConsumer --> CornerController : calls process_event()
     StationController ..> MotorController : uses
-    StationController ..> SensorReader : uses
-    StationController ..> NFCReader : uses
     StationController ..> DataLogger : uses
-    StationController ..> Part : uses
     CornerController ..> MotorController : uses
-    CornerController ..> SensorReader : uses
     CornerController ..> CollisionManager : uses
-    NFCReader ..> Part : creates
+    CornerController ..> SensorReader : uses helper functions
+    DataLogger ..> MQTTHandler : uses
+
 
 ```
 

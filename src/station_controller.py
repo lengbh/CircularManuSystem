@@ -1,16 +1,18 @@
 """
-Station Controller
-Manages station processing with state machine
+Station Controller Passive Finite State Machine (FSM) Architecture
+Event driven state machine
 """
 
 import logging
 import time
-from enum import Enum #For named constants group
-from threading import Thread, Event # For simultaneously run the station control loop in the background
+from enum import Enum  # For defining station states
+from threading import Timer  # For non blocking delays
+
 
 class StationState(Enum):
-    """Station's possible states"""
+    """Station states"""
     IDLE = "idle"
+    ENTERING = "entering"
     ADVANCING_TO_PROCESS = "advancing_to_process"
     PROCESSING = "processing"
     ADVANCING_TO_EXIT = "advancing_to_exit"
@@ -19,16 +21,20 @@ class StationState(Enum):
 
 class StationController:
     """
-    Controls a single station
+    Passive Station Controller Finite State Machine (FSM)
 
-    State machine loop:
-    IDLE to ADVANCING_TO_PROCESS to PROCESSING to ADVANCING_TO_EXIT to EXITING back to IDLE
-
+    Responds to events from CEP Consumer
+    Implements guarded transitions for robust state management
     """
 
-    def __init__(self, station_num, motors, sensors, nfc, data_logger, config):
+    def __init__(self, station_num, motors, data_logger, config):
         """
         Initialize station controller
+
+        station_num: Station number (1 or 2)
+        motors: MotorController instance
+        data_logger: DataLogger instance
+        config: Configuration dictionary
         """
         self.logger = logging.getLogger(f"Station{station_num}")
         self.station_num = station_num
@@ -36,237 +42,237 @@ class StationController:
 
         # References to subsystems
         self.motors = motors
-        self.sensors = sensors
-        self.nfc = nfc
         self.data_logger = data_logger
 
         # Configuration
         self.config = config
         self.process_time = config['stations'][f'station{station_num}_process_time']
 
-        # Determine motor speed and direction based on station number
+        # Motor configuration
         if self.station_num == 1:
-            # Station 1 (M3) moves down (forward)
             self.motor_speed = config['motors']['station_speed']
         else:
-            # Station 2 (M4) must move up (reverse)
+            # Station 2 runs in reverse direction
             self.motor_speed = -config['motors']['station_speed']
 
-        # Assign motor number (Motor 3 for Station 1, Motor 4 for Station 2)
-        self.motor_num = 2 + station_num
+        self.motor_num = 2 + station_num  # Motor 3 or 4
 
-        # Initial state always IDLE and not processing anything
+        # State machine
         self.state = StationState.IDLE
         self.current_part = None
-        self.queue = []
+        self.entry_timestamp = None
 
-        # Background thread control
-        self.running = False
-        self.stop_event = Event()
-        self.thread = None
+        # Processing timer
+        self.process_timer = None
 
-        self.logger.info(f"Station {station_num} initialized")
+        self.logger.info(f"Station {station_num} initialized (passive FSM)")
 
-    def start(self):
-        """Start station control thread"""
-        if self.running:
-            return      # Don't start again if already running
+    def process_event(self, event):
+        """
+        Process an event from CEP Consumer
 
-        self.running = True
-        self.stop_event.clear()
-        self.thread = Thread(target=self._run, daemon=True) # Daemon thread to exit with main program
-        self.thread.start()
-        self.logger.info(f"Station {self.station_num} started")
+        Event format:
+        {
+            'timestamp',
+            'barrier_id',
+            'part_id',
+            'location_type',
+            'location_id'
+        }
+        """
+        timestamp = event['timestamp']
+        barrier_id = event['barrier_id']
+        part_id = event['part_id']
 
-    def stop(self):
-        """Stop station control thread"""
-        if not self.running:
+        self.logger.debug(f"Event: {barrier_id}, State: {self.state.value}, Part: {part_id}")
+
+        # State-specific event handling
+        if self.state == StationState.IDLE:
+            self._handle_idle(event)
+
+        elif self.state == StationState.ENTERING:
+            self._handle_entering(event)
+
+        elif self.state == StationState.ADVANCING_TO_PROCESS:
+            self._handle_advancing_to_process(event)
+
+        elif self.state == StationState.PROCESSING:
+            self._handle_processing(event)
+
+        elif self.state == StationState.ADVANCING_TO_EXIT:
+            self._handle_advancing_to_exit(event)
+
+        elif self.state == StationState.EXITING:
+            self._handle_exiting(event)
+
+    def _handle_idle(self, event):
+        """Handle events in IDLE state"""
+        barrier_id = event['barrier_id']
+        part_id = event['part_id']
+        timestamp = event['timestamp']
+
+        # Only accept ENTRY barrier
+        if barrier_id != f'S{self.station_num}_ENTRY':
+            self.logger.warning(f"Unexpected barrier in IDLE: {barrier_id}")
             return
 
-        self.running = False
-        self.stop_event.set()
-        if self.thread:
-            self.thread.join(timeout=2)
-        self.motors.stop(self.motor_num) # Ensure station motor is stopped
-        self.logger.info(f"Station {self.station_num} stopped")
-
-    def _run(self):
-        """Main station control loop"""
-        self.logger.info(f"Station {self.station_num} control loop started")
-
-        while self.running and not self.stop_event.is_set():
-            try:
-                # State machine logic
-                if self.state == StationState.IDLE:
-                    self._state_idle()
-
-                elif self.state == StationState.ADVANCING_TO_PROCESS:
-                    self._state_advancing_to_process()
-
-                elif self.state == StationState.PROCESSING:
-                    self._state_processing()
-
-                elif self.state == StationState.ADVANCING_TO_EXIT:
-                    self._state_advancing_to_exit()
-
-                elif self.state == StationState.EXITING:
-                    self._state_exiting()
-
-                time.sleep(0.05)  # Small delay for loop iteration
-
-            except Exception as e:
-                self.logger.error(f"Error in control loop: {e}", exc_info=True)
-                self.motors.stop(self.motor_num)
-                time.sleep(1)
-
-    def _state_idle(self):
-        """Idle state - waiting for part at entry sensor"""
-
-        # Check if part at entry
-        entry_sensor_check = self.sensors.station1_entry() if self.station_num == 1 else self.sensors.station2_entry()
-
-        if entry_sensor_check:
-            self.logger.info("Part detected at entry. Reading NFC tag...")
-
-            # Read the NFC tag while the sensor is blocked
-            tag_uid = self.nfc.read_tag(timeout=2.0)  # 2 second read timeout
-
-            # Re-check sensor: is the part STILL there after the read?
-            entry_sensor_check_after = self.sensors.station1_entry() if self.station_num == 1 else self.sensors.station2_entry()
-
-            if not entry_sensor_check_after:
-                self.logger.warning("Part detected but disappeared during NFC read. Resetting.")
-                return  # Stay in IDLE state
-
-            if tag_uid:
-                # Create part object
-                from nfc_reader import Part
-                self.current_part = Part(tag_uid)
-                self.logger.info(f"Part identified: {tag_uid}")
-            else:
-                # Generate part ID if no tag
-                from nfc_reader import Part
-                part_id = f"P{int(time.time() * 1000) % 10000}"
-                self.current_part = Part(part_id)
-                self.logger.warning(f"No NFC tag - generated ID: {part_id}")
-
-            # Log ENTER event
+        # Must have part_id (from NFC fusion)
+        if part_id is None:
+            self.logger.error(f"Entry event without part_id (orphaned)")
             self.data_logger.log_event(
-                self.current_part.part_id,
-                self.station_id,
-                "ENTER"
+                part_id='UNKNOWN',
+                station_id=self.station_id,
+                activity='ERROR_NO_PART_ID'
             )
-            self.current_part.add_event(self.station_id, "ENTER")
+            return
 
-            # Advance to process
-            self.state = StationState.ADVANCING_TO_PROCESS
+        # Accept part entry
+        self.current_part = part_id
+        self.entry_timestamp = timestamp
 
-    def _state_advancing_to_process(self):
-        """Advancing part to process position"""
-        self.logger.info("Advancing to process position...")
+        # Log ENTER with timestamp
+        self.data_logger.log_event(
+            part_id=self.current_part,
+            station_id=self.station_id,
+            activity='ENTER'
+        )
+
+        self.logger.info(f"Part {part_id[:8]} entered at t={timestamp:.6f}")
+
+        # Start motor to advance part
         self.motors.set_speed(self.motor_num, self.motor_speed)
 
-        # Wait for process sensor
-        sensor_triggered = False
-        if self.station_num == 1:
-            sensor_triggered = self.sensors.wait_for_pi(
-                self.sensors.STATION1_PROCESS,
-                timeout=10
-            )
-        else:
-            sensor_triggered = self.sensors.wait_for_pi(
-                self.sensors.STATION2_PROCESS,
-                timeout=10
-            )
+        # Transition
+        self.state = StationState.ENTERING
 
-        self.motors.stop(self.motor_num)
+    def _handle_entering(self, event):
+        """Handle events in ENTERING state"""
+        barrier_id = event['barrier_id']
 
-        if sensor_triggered:
-            self.logger.info("Part at process position")
+        # Implement low frequency handling to avoid jitter issues
+        if barrier_id == f'S{self.station_num}_ENTRY':
+            # Ignore jitter on entry sensor
+            self.logger.debug("Ignoring jitter on ENTRY barrier")
+            return
+
+        # Accept PROCESS barrier
+        if barrier_id == f'S{self.station_num}_PROCESS':
+            self.motors.stop(self.motor_num)
+            self.logger.info("Part reached process position")
+
+            # Start processing timer
             self.state = StationState.PROCESSING
-        else:
-            self.logger.error("Timeout waiting for process sensor")
-            self.data_logger.log_event(
-                self.current_part.part_id,
-                self.station_id,
-                "ERROR_TIMEOUT_PROCESS"
-            )
-            self.current_part = None
-            self.state = StationState.IDLE
+            self._start_processing()
+            return
 
-    def _state_processing(self):
-        """Processing part"""
-        self.logger.info(f"Processing for {self.process_time}s...")
+        # Unexpected barrier
+        self.logger.warning(f"Unexpected barrier in ENTERING: {barrier_id}")
 
-        # Wait for the defined "processing" time
-        time.sleep(self.process_time)
+    def _handle_advancing_to_process(self, event):
+        """Handle events in ADVANCING_TO_PROCESS state (if needed)"""
+        pass
 
+    def _handle_processing(self, event):
+        """Handle events in PROCESSING state"""
+        barrier_id = event['barrier_id']
+
+        # Ignore jitter on process sensor
+        if barrier_id == f'S{self.station_num}_PROCESS':
+            self.logger.debug("Ignoring jitter on PROCESS barrier")
+            return
+
+        # Shouldn't get other events during processing
+        self.logger.warning(f"Unexpected event during PROCESSING: {barrier_id}")
+
+    def _start_processing(self):
+        """Start processing timer"""
+        self.logger.info(f"Processing started ({self.process_time}s)")
+
+        # Use threading.Timer for non-blocking delay
+        self.process_timer = Timer(self.process_time, self._processing_complete)
+        self.process_timer.start()
+
+    def _processing_complete(self):
+        """Called when processing timer expires"""
         self.logger.info("Processing complete")
+
+        # Start motor to advance to exit
+        self.motors.set_speed(self.motor_num, self.motor_speed)
+
+        # Transition
         self.state = StationState.ADVANCING_TO_EXIT
 
-    def _state_advancing_to_exit(self):
-        """Advancing part to exit"""
-        self.logger.info("Advancing to exit...")
-        self.motors.set_speed(self.motor_num, self.motor_speed)
+    def _handle_advancing_to_exit(self, event):
+        """Handle events in ADVANCING_TO_EXIT state"""
+        barrier_id = event['barrier_id']
+        timestamp = event['timestamp']
 
-        # Wait for exit sensor
-        sensor_triggered = False
-        if self.station_num == 1:
-            sensor_triggered = self.sensors.wait_for_pi(
-                self.sensors.STATION1_EXIT,
-                timeout=10
-            )
-        else:
-            sensor_triggered = self.sensors.wait_for_pi(
-                self.sensors.STATION2_EXIT,
-                timeout=10
-            )
+        # Accept EXIT barrier
+        if barrier_id == f'S{self.station_num}_EXIT':
+            self.motors.stop(self.motor_num)
+            self.logger.info("Part reached exit")
 
-        self.motors.stop(self.motor_num)
+            # Run motor briefly to clear sensor
+            self.motors.set_speed(self.motor_num, self.motor_speed)
 
-        if sensor_triggered:
-            self.logger.info("Part at exit")
+            # Transition
             self.state = StationState.EXITING
-        else:
-            self.logger.error("Timeout waiting for exit sensor")
-            self.data_logger.log_event(
-                self.current_part.part_id,
-                self.station_id,
-                "ERROR_TIMEOUT_EXIT"
-            )
-            self.current_part = None
-            self.state = StationState.IDLE
 
-    def _state_exiting(self):
-        """Exiting part from station"""
-        # Run motor briefly to clear the sensor
-        self.motors.set_speed(self.motor_num, self.motor_speed)
+            # Start exit timer (give part time to clear sensor)
+            Timer(1.0, self._exit_complete, args=[timestamp]).start()
+            return
 
-        # Wait for sensor to clear with timeout
-        start_time = time.time()
-        timeout = 5.0
+        # Unexpected barrier
+        self.logger.warning(f"Unexpected barrier in ADVANCING_TO_EXIT: {barrier_id}")
 
-        exit_sensor = (self.sensors.station1_exit if self.station_num == 1
-                       else self.sensors.station2_exit)
+    def _handle_exiting(self, event):
+        """Handle events in EXITING state"""
+        barrier_id = event['barrier_id']
 
-        while time.time() - start_time < timeout:
-            if not exit_sensor():  # Sensor cleared
-                time.sleep(0.5)  # Brief extra time to ensure part is fully clear
-                break
-            time.sleep(0.1)
+        # Accept EXIT barrier going low (part cleared)
+        if barrier_id == f'S{self.station_num}_EXIT':
+            pass
 
+    def _exit_complete(self, exit_timestamp):
+        """Called when exit timer expires"""
         self.motors.stop(self.motor_num)
 
-        # Log EXIT event
+        # Log EXIT with timestamp
         if self.current_part:
             self.data_logger.log_event(
-                self.current_part.part_id,
-                self.station_id,
-                "EXIT"
+                part_id=self.current_part,
+                station_id=self.station_id,
+                activity='EXIT'
             )
-            self.current_part.add_event(self.station_id, "EXIT")
-            self.logger.info(f"Part {self.current_part.get_short_id()} completed")
 
-        # Reset the station
+            cycle_time = exit_timestamp - self.entry_timestamp
+            self.logger.info(
+                f"Part {self.current_part[:8]} exited (cycle time: {cycle_time:.2f}s)"
+            )
+
+        # Reset
         self.current_part = None
+        self.entry_timestamp = None
         self.state = StationState.IDLE
+
+        self.logger.info("Station ready for next part")
+
+    def stop(self):
+        """Stop the station controller"""
+        # Cancel any active timers
+        if self.process_timer and self.process_timer.is_alive():
+            self.process_timer.cancel()
+
+        # Stop motor
+        self.motors.stop(self.motor_num)
+
+        self.logger.info(f"Station {self.station_num} stopped")
+
+    def get_status(self):
+        """Get current station status"""
+        return {
+            'station_id': self.station_id,
+            'state': self.state.value,
+            'current_part': self.current_part,
+            'entry_timestamp': self.entry_timestamp
+        }
