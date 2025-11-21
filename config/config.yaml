@@ -1,0 +1,84 @@
+# Manufacturing System Configuration
+
+system:
+  name: "Circular Manufacturing System"
+  description: "Lab-scale two-station manufacturing system"
+  version: "1.0"
+
+motors:
+  # Motor speeds (0.0 = stop, 1.0 = full speed)
+  conveyor_speed: 0.5      # Main conveyors (top/bottom)
+  station_speed: 0.4       # Station conveyors (slower for precision)
+  corner_speed: 0.7        # Corner pushers (faster transfer)
+
+stations:
+  # Processing times in seconds
+  station1_process_time: 5
+  station2_process_time: 7
+
+  # Queue behavior
+  max_queue_size: 3
+  queue_timeout: 30
+
+corners:
+  # Corner pusher timing in seconds
+  extend_time: 1.5
+  retract_time: 1.5
+  cooldown: 0.5
+  final_approach_delay: 0.5  # Time (sec) to travel
+  handshake_timeout: 5.0   # Max seconds to wait for part to reach next sensor
+
+  # Collision prevention
+  min_interval: 2.0          # Minimum seconds between corner uses
+  check_adjacent: true       # Check adjacent corners
+
+sensors:
+  # Sensor configuration
+  timeout: 10                # Sensor wait timeout (seconds)
+  debounce: 0.05            # Debounce time (seconds)
+  poll_interval: 0.01       # Poll interval (seconds)
+
+nfc:
+  # NFC reader configuration
+  read_timeout: 2.0         # Tag read timeout (seconds)
+  retry_count: 3            # Number of retries
+  wait_after_read: 0.5      # Wait after successful read (seconds)
+
+# Complex Event Processing (CEP) Configuration
+cep:
+  # Time-window fusion parameters
+  fusion_window: 2.0        # Maximum time difference for event fusion (seconds)
+  expiry_timeout: 5.0       # Time before events are discarded as orphans/ghosts (seconds)
+
+  # Queue sizes
+  gpio_queue_size: 100      # Max GPIO events in queue
+  mcp_queue_size: 100       # Max MCP23017 events in queue
+  nfc_queue_size: 20        # Max NFC events in queue
+
+mqtt:
+  # MQTT broker configuration
+  broker_host: "localhost"
+  broker_port: 1883
+  username: ""
+  password: ""
+
+  # Topics
+  events_topic: "manufacturing/events"
+  kpis_topic: "manufacturing/kpis"
+  status_topic: "manufacturing/system/status"
+
+logging:
+  # Logging configuration
+  level: "INFO"             # DEBUG, INFO, WARNING, ERROR
+  event_file: "data/events.csv"
+  system_log: "logs/system.log"
+
+  # Log rotation
+  max_bytes: 10485760       # 10 MB
+  backup_count: 5
+
+simulation:
+  # Simulation mode settings (for Mac development)
+  enabled: false            # Auto-detected based on platform
+  random_events: false      # Generate random sensor events
+  event_interval: 2.0       # Seconds between simulated events
