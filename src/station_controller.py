@@ -5,8 +5,8 @@ Event driven state machine
 
 import logging
 import time
-from enum import Enum  # For defining station states
-from threading import Timer  # For non blocking delays
+from enum import Enum # For defining station states
+from threading import Timer # For non blocking delays
 
 
 class StationState(Enum):
@@ -58,7 +58,7 @@ class StationController:
         self.motor_num = 2 + station_num  # Motor 3 or 4
 
         # State machine
-        self.state = StationState.IDLE
+        self._transition_to(StationState.IDLE)
         self.current_part = None
         self.entry_timestamp = None
 
@@ -66,6 +66,24 @@ class StationController:
         self.process_timer = None
 
         self.logger.info(f"Station {station_num} initialized (passive FSM)")
+        self.influx_writer = None
+
+    def _transition_to(self, new_state):
+        """
+        Handle state transitions with InfluxDB logging
+        """
+        old_state = self.state
+        self.state = new_state
+
+        self.logger.debug(f"State transition: {old_state.value} -> {new_state.value}")
+
+        # Log to InfluxDB
+        if self.influx_writer:
+            self.influx_writer.write_station_state(
+                station_id=self.station_id,
+                state=new_state.value,
+                part_id=self.current_part
+            )
 
     def process_event(self, event):
         """
@@ -143,7 +161,7 @@ class StationController:
         self.motors.set_speed(self.motor_num, self.motor_speed)
 
         # Transition
-        self.state = StationState.ENTERING
+        self._transition_to(StationState.ENTERING)
 
     def _handle_entering(self, event):
         """Handle events in ENTERING state"""
@@ -161,7 +179,7 @@ class StationController:
             self.logger.info("Part reached process position")
 
             # Start processing timer
-            self.state = StationState.PROCESSING
+            self._transition_to(StationState.PROCESSING)
             self._start_processing()
             return
 
@@ -200,7 +218,7 @@ class StationController:
         self.motors.set_speed(self.motor_num, self.motor_speed)
 
         # Transition
-        self.state = StationState.ADVANCING_TO_EXIT
+        self._transition_to(StationState.ADVANCING_TO_EXIT)
 
     def _handle_advancing_to_exit(self, event):
         """Handle events in ADVANCING_TO_EXIT state"""
@@ -216,7 +234,7 @@ class StationController:
             self.motors.set_speed(self.motor_num, self.motor_speed)
 
             # Transition
-            self.state = StationState.EXITING
+            self._transition_to(StationState.EXITING)
 
             # Start exit timer (give part time to clear sensor)
             Timer(1.0, self._exit_complete, args=[timestamp]).start()
@@ -253,7 +271,7 @@ class StationController:
         # Reset
         self.current_part = None
         self.entry_timestamp = None
-        self.state = StationState.IDLE
+        self._transition_to(StationState.IDLE)
 
         self.logger.info("Station ready for next part")
 

@@ -1,0 +1,86 @@
+{
+  "dashboard": {
+    "title": "Circular Manufacturing System",
+    "tags": ["manufacturing", "production"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Throughput (parts/hour)",
+        "type": "graph",
+        "targets": [
+          {
+            "query": "from(bucket: \"manufacturing\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"manufacturing_kpis\")\n  |> filter(fn: (r) => r.kpi_name == \"throughput_per_hour\")",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
+      },
+      {
+        "title": "Work In Progress (WIP)",
+        "type": "graph",
+        "targets": [
+          {
+            "query": "from(bucket: \"manufacturing\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"manufacturing_kpis\")\n  |> filter(fn: (r) => r.kpi_name == \"current_wip\")",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
+      },
+      {
+        "title": "Station Utilization",
+        "type": "graph",
+        "targets": [
+          {
+            "query": "from(bucket: \"manufacturing\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"manufacturing_kpis\")\n  |> filter(fn: (r) => r.kpi_name == \"station1_utilization\" or r.kpi_name == \"station2_utilization\")",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8}
+      },
+      {
+        "title": "Cycle Times",
+        "type": "graph",
+        "targets": [
+          {
+            "query": "from(bucket: \"manufacturing\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"manufacturing_kpis\")\n  |> filter(fn: (r) => r.kpi_name == \"avg_cycle_time_s1\" or r.kpi_name == \"avg_cycle_time_s2\")",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8}
+      },
+      {
+        "title": "Station States (Real-time)",
+        "type": "state-timeline",
+        "targets": [
+          {
+            "query": "from(bucket: \"manufacturing\")\n  |> range(start: -15m)\n  |> filter(fn: (r) => r._measurement == \"station_states\")\n  |> filter(fn: (r) => r._field == \"state_value\")",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"x": 0, "y": 16, "w": 24, "h": 6}
+      },
+      {
+        "title": "CEP Fusion Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "query": "from(bucket: \"manufacturing\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"cep_statistics\")\n  |> filter(fn: (r) => r._field == \"fusion_rate_pct\")\n  |> last()",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"x": 0, "y": 22, "w": 6, "h": 4}
+      },
+      {
+        "title": "Total Parts Completed",
+        "type": "stat",
+        "targets": [
+          {
+            "query": "from(bucket: \"manufacturing\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"manufacturing_kpis\")\n  |> filter(fn: (r) => r.kpi_name == \"total_parts\")\n  |> last()",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"x": 6, "y": 22, "w": 6, "h": 4}
+      }
+    ]
+  }
+}

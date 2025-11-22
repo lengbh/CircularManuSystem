@@ -81,6 +81,23 @@ class CornerController:
             self._start_feed_conveyor()
 
         self.logger.info(f"Corner {corner_num} initialized (passive FSM)")
+        self.influx_writer = None
+
+    def _transition_to(self, new_state):
+        """
+        Handle state transitions with InfluxDB logging
+        """
+        old_state = self.state
+        self.state = new_state
+
+        self.logger.debug(f"State transition: {old_state.value} -> {new_state.value}")
+
+        # Log to InfluxDB
+        if self.influx_writer:
+            self.influx_writer.write_corner_state(
+                corner_id=self.corner_id,
+                state=new_state.value
+            )
 
     def process_event(self, event):
         """
@@ -146,7 +163,7 @@ class CornerController:
         self.approach_timer = Timer(self.final_delay, self._final_approach_complete)
         self.approach_timer.start()
 
-        self.state = CornerState.FINAL_APPROACH
+        self._transition_to(CornerState.FINAL_APPROACH)
 
     def _handle_final_approach(self, event):
         """Handle events in FINAL_APPROACH state"""
@@ -156,7 +173,7 @@ class CornerController:
     def _final_approach_complete(self):
         """Called when final approach timer expires"""
         self.logger.info("Final approach complete, part in position")
-        self.state = CornerState.READY_TO_PUSH
+        self._transition_to(CornerState.READY_TO_PUSH)
 
         # Try to reserve corner
         self._try_push()
@@ -165,7 +182,7 @@ class CornerController:
         """Try to reserve corner and start push"""
         if self.collision_mgr.request_corner(self.corner_num):
             self.logger.info("Corner reserved, starting push")
-            self.state = CornerState.EXTENDING
+            self._transition_to(CornerState.EXTENDING)
             self._extend_pusher()
         else:
             # Not safe yet, try again later
@@ -187,10 +204,10 @@ class CornerController:
         barrier_id = event['barrier_id']
 
         # Wait for extended limit switch
-        if barrier_id == f'CORNER{self.corner_num}_EXT':  # Extended limit switch hit
+        if barrier_id == f'CORNER{self.corner_num}_EXT': # Extended limit switch hit
             self.motors.stop(self.motor_num)
             self.logger.info("Pusher extended")
-            self.state = CornerState.PUSHING
+            self._transition_to(CornerState.PUSHING)
 
             # Set handshake wait flag
             self.collision_mgr.set_handshake_wait(self.corner_num)
@@ -202,7 +219,7 @@ class CornerController:
             )
             self.handshake_timer.start()
 
-            self.state = CornerState.WAITING_FOR_CONFIRMATION
+            self._transition_to(CornerState.WAITING_FOR_CONFIRMATION)
 
     def _handle_pushing(self, event):
         """Handle events in PUSHING state"""
@@ -223,7 +240,7 @@ class CornerController:
             self.collision_mgr.clear_handshake_wait(self.corner_num)
 
             # Start retraction
-            self.state = CornerState.RETRACTING
+            self._transition_to(CornerState.RETRACTING)
             self._retract_pusher()
 
     def _handshake_timeout(self):
@@ -258,7 +275,7 @@ class CornerController:
             self._start_feed_conveyor()
 
             # Return to IDLE
-            self.state = CornerState.IDLE
+            self._transition_to(CornerState.IDLE)
             self.logger.info("Corner ready for next part")
 
     def _start_feed_conveyor(self):

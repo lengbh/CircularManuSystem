@@ -52,7 +52,7 @@ class CEPConsumer(Thread):
 
         # Pending event lists (for fusion)
         self.pending_gpio_events = []  # List of GPIO/MCP sensor events
-        self.pending_nfc_events = []  # List of NFC events
+        self.pending_nfc_events = []   # List of NFC events
 
         # Thread control
         self.running = False
@@ -68,6 +68,7 @@ class CEPConsumer(Thread):
         }
 
         self.logger.info(f"CEP Consumer initialized (fusion={self.DELTA_T_FUSE}s, expiry={self.DELTA_T_EXPIRY}s)")
+        self.influx_writer = None
 
     def run(self):
         """Main CEP loop for consuming, fusing, expiring, and delivering events"""
@@ -298,6 +299,14 @@ class CEPConsumer(Thread):
             self.logger.debug(f"Delivered to {fsm_key}: {sensor_event['barrier_id']}")
         except Exception as e:
             self.logger.error(f"Error delivering event to {fsm_key}: {e}", exc_info=True)
+
+        # Log sensor event to InfluxDB
+        if self.influx_writer:
+            self.influx_writer.write_sensor_event(
+                barrier_id=sensor_event['barrier_id'],
+                location_type=location_type,
+                location_id=location_id
+            )
 
     def _print_statistics(self):
         """Print CEP statistics"""
