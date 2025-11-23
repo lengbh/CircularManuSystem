@@ -76,23 +76,21 @@ class CornerController:
         self.approach_timer = None
         self.handshake_timer = None
 
+        self.influx_writer = None
+
         # Conveyor control
         if self.is_fed_by_main_conveyor:
             self._start_feed_conveyor()
 
         self.logger.info(f"Corner {corner_num} initialized (passive FSM)")
-        self.influx_writer = None
 
     def _transition_to(self, new_state):
-        """
-        Handle state transitions with InfluxDB logging
-        """
+        """Handle state transitions with InfluxDB logging"""
         old_state = self.state
         self.state = new_state
 
         self.logger.debug(f"State transition: {old_state.value} -> {new_state.value}")
 
-        # Log to InfluxDB
         if self.influx_writer:
             self.influx_writer.write_corner_state(
                 corner_id=self.corner_id,
@@ -204,7 +202,7 @@ class CornerController:
         barrier_id = event['barrier_id']
 
         # Wait for extended limit switch
-        if barrier_id == f'CORNER{self.corner_num}_EXT': # Extended limit switch hit
+        if barrier_id == f'CORNER{self.corner_num}_EXT':
             self.motors.stop(self.motor_num)
             self.logger.info("Pusher extended")
             self._transition_to(CornerState.PUSHING)

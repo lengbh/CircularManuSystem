@@ -7,10 +7,10 @@ Event format: {timestamp, part_id, station_id, activity}
 """
 
 import logging
-import csv # For spreadsheets
-import os # For creating directories and checking if files exist
+import csv
+import os
 from datetime import datetime
-from threading import Lock # For preventing file corruption in case of same time processes
+from threading import Lock
 import time
 
 
@@ -50,23 +50,19 @@ class DataLogger:
             'total_queue_time': 0
         }
 
-        # Real-time tracking for Grafana
         self.system_start_time = time.time()
-        self.station_entry_times = {}  # Track when parts enter stations
+        self.station_entry_times = {}
         self.current_wip = 0
         self.max_wip = 0
 
-        # Cycle time tracking
         self.cycle_times_s1 = []
         self.cycle_times_s2 = []
 
-        # Station state tracking (for utilization)
         self.station_states = {
             'S1': {'busy_since': None, 'total_busy_time': 0},
             'S2': {'busy_since': None, 'total_busy_time': 0}
         }
 
-        # Corner state tracking
         self.corner_states = {
             'C1': {'busy_since': None, 'total_busy_time': 0},
             'C2': {'busy_since': None, 'total_busy_time': 0},
@@ -74,16 +70,16 @@ class DataLogger:
             'C4': {'busy_since': None, 'total_busy_time': 0}
         }
 
-        # Event count tracking (for throughput calculation)
-        self.event_timestamps = []  # List of (timestamp, station_id, activity) tuples
-        self.influx_writer = None  # Placeholder for InfluxDB writer
+        self.event_timestamps = []
 
+        self.influx_writer = None
 
     def _create_csv(self):
         """Create CSV file with headers"""
         with open(self.log_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['Time', 'Station ID', 'Part ID', 'Activity'])
+        self.logger.info("Created new event log file")
 
     def log_event(self, part_id, station_id, activity):
         """
@@ -111,12 +107,9 @@ class DataLogger:
             # Update KPIs
             self._update_kpis(station_id, activity)
 
-            # Update real-time metrics
             self._update_realtime_metrics(part_id, station_id, activity, current_time)
 
-            # Write to InfluxDB
             if self.influx_writer:
-                # Calculate cycle time if available
                 cycle_time = None
                 if activity == 'EXIT' and station_id in ['S1', 'S2']:
                     key = f"{part_id}_{station_id}"
@@ -140,45 +133,29 @@ class DataLogger:
                 self.kpis['station2_count'] += 1
 
     def _update_realtime_metrics(self, part_id, station_id, activity, current_time):
-        """
-        Update real-time metrics for Grafana
-
-        Tracks:
-        - WIP (Work In Progress)
-        - Cycle times
-        - Station utilization
-        - Event rate
-        """
-        # Track event for throughput calculation
+        """Update real-time metrics for Grafana"""
         self.event_timestamps.append((current_time, station_id, activity))
 
-        # Keep only last hour of events
         cutoff = current_time - 3600
         self.event_timestamps = [e for e in self.event_timestamps if e[0] > cutoff]
 
-        # Handle station events
         if station_id in ['S1', 'S2']:
             if activity == 'ENTER':
-                # Part enters station
                 key = f"{part_id}_{station_id}"
                 self.station_entry_times[key] = current_time
                 self.current_wip += 1
                 self.max_wip = max(self.max_wip, self.current_wip)
 
-                # Mark station as busy
                 if self.station_states[station_id]['busy_since'] is None:
                     self.station_states[station_id]['busy_since'] = current_time
 
             elif activity == 'EXIT':
-                # Part exits station
                 key = f"{part_id}_{station_id}"
                 if key in self.station_entry_times:
                     cycle_time = current_time - self.station_entry_times[key]
 
-                    # Record cycle time
                     if station_id == 'S1':
                         self.cycle_times_s1.append(cycle_time)
-                        # Keep only last 100 samples
                         if len(self.cycle_times_s1) > 100:
                             self.cycle_times_s1.pop(0)
                     elif station_id == 'S2':
@@ -188,25 +165,20 @@ class DataLogger:
 
                     del self.station_entry_times[key]
 
-                # Part exits system at S2
                 if station_id == 'S2':
                     self.current_wip = max(0, self.current_wip - 1)
 
-                # Mark station as idle
                 if self.station_states[station_id]['busy_since'] is not None:
                     busy_duration = current_time - self.station_states[station_id]['busy_since']
                     self.station_states[station_id]['total_busy_time'] += busy_duration
                     self.station_states[station_id]['busy_since'] = None
 
-        # Handle corner events
         elif station_id in ['C1', 'C2', 'C3', 'C4']:
             if activity == 'PUSH_START':
-                # Corner starts pushing
                 if self.corner_states[station_id]['busy_since'] is None:
                     self.corner_states[station_id]['busy_since'] = current_time
 
             elif activity == 'PUSH_COMPLETE':
-                # Corner finished pushing
                 if self.corner_states[station_id]['busy_since'] is not None:
                     busy_duration = current_time - self.corner_states[station_id]['busy_since']
                     self.corner_states[station_id]['total_busy_time'] += busy_duration
@@ -223,7 +195,6 @@ class DataLogger:
             current_time = time.time()
             runtime = current_time - self.system_start_time
 
-            # Calculate cycle time averages
             avg_cycle_s1 = (
                 sum(self.cycle_times_s1) / len(self.cycle_times_s1)
                 if self.cycle_times_s1 else 0
@@ -233,18 +204,15 @@ class DataLogger:
                 if self.cycle_times_s2 else 0
             )
 
-            # Calculate throughput (parts/hour)
             throughput = 0
-            if runtime > 60:  # Only after 1 minute
+            if runtime > 60:
                 parts_completed = self.kpis['total_parts']
                 throughput = (parts_completed / runtime) * 3600
 
-            # Calculate station utilization
             def get_utilization(station_id):
                 state = self.station_states[station_id]
                 total_busy = state['total_busy_time']
 
-                # Add current busy time if station is busy now
                 if state['busy_since'] is not None:
                     total_busy += (current_time - state['busy_since'])
 
@@ -253,7 +221,6 @@ class DataLogger:
             s1_util = get_utilization('S1')
             s2_util = get_utilization('S2')
 
-            # Calculate corner utilization
             def get_corner_utilization(corner_id):
                 state = self.corner_states[corner_id]
                 total_busy = state['total_busy_time']
@@ -263,16 +230,12 @@ class DataLogger:
 
                 return (total_busy / runtime * 100) if runtime > 0 else 0
 
-            # Calculate event rate (events per minute)
             event_rate = len(self.event_timestamps) / (min(runtime, 3600) / 60) if runtime > 0 else 0
 
             return {
-                # EXISTING KPIs
                 'total_parts': self.kpis['total_parts'],
                 'station1_count': self.kpis['station1_count'],
                 'station2_count': self.kpis['station2_count'],
-
-                # NEW: Real-time metrics
                 'throughput_per_hour': throughput,
                 'avg_cycle_time_s1': avg_cycle_s1,
                 'avg_cycle_time_s2': avg_cycle_s2,
