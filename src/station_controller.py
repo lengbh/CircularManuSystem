@@ -5,8 +5,8 @@ Event driven state machine
 
 import logging
 import time
-from enum import Enum # For defining station states
-from threading import Timer # For non blocking delays
+from enum import Enum
+from threading import Timer
 
 
 class StationState(Enum):
@@ -58,26 +58,24 @@ class StationController:
         self.motor_num = 2 + station_num  # Motor 3 or 4
 
         # State machine
-        self._transition_to(StationState.IDLE)
+        self.state = StationState.IDLE
         self.current_part = None
         self.entry_timestamp = None
 
         # Processing timer
         self.process_timer = None
 
-        self.logger.info(f"Station {station_num} initialized (passive FSM)")
         self.influx_writer = None
 
+        self.logger.info(f"Station {station_num} initialized (passive FSM)")
+
     def _transition_to(self, new_state):
-        """
-        Handle state transitions with InfluxDB logging
-        """
+        """Handle state transitions with InfluxDB logging"""
         old_state = self.state
         self.state = new_state
 
         self.logger.debug(f"State transition: {old_state.value} -> {new_state.value}")
 
-        # Log to InfluxDB
         if self.influx_writer:
             self.influx_writer.write_station_state(
                 station_id=self.station_id,

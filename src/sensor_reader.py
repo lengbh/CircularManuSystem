@@ -35,7 +35,7 @@ class SensorReader:
     STATION2_PROCESS = 6
     STATION2_EXIT = 13
     CORNER1_POS = 21
-    CORNER3_POS = 1  # BCM GPIO 1 = Physical Pin 28
+    CORNER3_POS = 12  # BCM GPIO 12 = Physical Pin 32
 
     # Sensor name mapping (GPIO pin to a light barrier name)
     GPIO_TO_BARRIER = {
@@ -46,7 +46,7 @@ class SensorReader:
         6: 'S2_PROCESS',
         13: 'S2_EXIT',
         21: 'C1_POS',
-        1: 'C3_POS'
+        12: 'C3_POS'
     }
 
     # Barrier to station/corner mapping
@@ -134,9 +134,8 @@ class SensorReader:
             GPIO.setwarnings(False)
 
             # Setup all Pi GPIO pins
-            for pin in set([self.STATION1_ENTRY, self.STATION1_PROCESS, self.STATION1_EXIT,
-                           self.STATION2_ENTRY, self.STATION2_PROCESS, self.STATION2_EXIT,
-                           self.CORNER1_POS, self.CORNER3_POS]):
+            for pin in {self.STATION1_ENTRY, self.STATION1_PROCESS, self.STATION1_EXIT, self.STATION2_ENTRY,
+                        self.STATION2_PROCESS, self.STATION2_EXIT, self.CORNER1_POS, self.CORNER3_POS}:
                 # Configure as input with pull-up resistor
                 GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
