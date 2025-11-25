@@ -176,6 +176,14 @@ class StationController:
             self.motors.stop(self.motor_num)
             self.logger.info("Part reached process position")
 
+            # Log PROCESS_START activity
+            self.data_logger.log_event(
+                part_id=self.current_part,
+                station_id=self.station_id,
+                activity='PROCESS_START',
+                tag='START'
+            )
+
             # Start processing timer
             self._transition_to(StationState.PROCESSING)
             self._start_processing()
@@ -211,6 +219,14 @@ class StationController:
     def _processing_complete(self):
         """Called when processing timer expires"""
         self.logger.info("Processing complete")
+
+        # Log PROCESS_END activity
+        self.data_logger.log_event(
+            part_id=self.current_part,
+            station_id=self.station_id,
+            activity='PROCESS_END',
+            tag='FINISH'
+        )
 
         # Start motor to advance to exit
         self.motors.set_speed(self.motor_num, self.motor_speed)
