@@ -11,7 +11,7 @@ import platform
 import signal
 import time
 
-# Add src directory to path
+# Add physical_system directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from system_manager import SystemManager
